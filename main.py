@@ -113,6 +113,7 @@ def main():
         screen.fill(BG_COLOR)
         all_sprites.draw(screen)
 
+<<<<<<< HEAD
         score_surface = font.render(f"Score: {score}", True, (255, 255, 255))
         screen.blit(score_surface, (20, 20))
 
@@ -123,3 +124,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+=======
+# Когда игровой цикл завершился — корректно выключаем Pygame.
+pygame.quit()
+>>>>>>> 3a4ede8751e4032e5909ad271223ddeb4d1bf9da
