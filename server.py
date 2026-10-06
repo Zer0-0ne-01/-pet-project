@@ -1,14 +1,19 @@
 # server.py
 import json
+import math
 import socket
 import time
 
 # --- НАСТРОЙКИ ---
 HOST, PORT = "0.0.0.0", 9999
 WIDTH, HEIGHT = 1024, 768
-PLAYER_SPEED = 300.0          # пикселей в секунду
-TICK_DT = 1.0 / 30.0          # серверный тик — 30 Гц
+PLAYER_SPEED = 300.0
+TICK_DT = 1.0 / 30.0
 BUFFER_SIZE = 2048
+
+PROJECTILE_SPEED = 700.0        # пикселей в секунду
+PROJECTILE_LIFETIME = 1.5       # секунд до самоуничтожения
+SHOOT_COOLDOWN = 0.20           # сек между выстрелами одного игрока
 
 COLORS = [
     (80, 200, 120),
@@ -30,10 +35,11 @@ def main():
     sock.setblocking(False)
     print(f"[SERVER] listening on {HOST}:{PORT}")
 
-    # id -> {"addr":..., "x":..., "y":..., "dx":..., "dy":..., "color":...}
-    players = {}
-    addr_to_id = {}          # addr -> id
+    players = {}            # id -> {addr, x, y, dx, dy, color, last_shot}
+    addr_to_id = {}         # addr -> id
+    projectiles = {}        # pid -> {x, y, vx, vy, color, ttl, owner}
     next_id = 1
+    next_projectile_id = 1
     next_color = 0
 
     last_tick = time.time()
@@ -70,6 +76,7 @@ def main():
                             "dx": 0,
                             "dy": 0,
                             "color": color,
+                            "last_shot": 0.0,
                         }
                         welcome = json.dumps({
                             "type": "welcome",
@@ -86,27 +93,77 @@ def main():
                         p["dx"] = clamp(int(msg.get("dx", 0)), -1, 1)
                         p["dy"] = clamp(int(msg.get("dy", 0)), -1, 1)
 
+                elif mtype == "shoot":
+                    pid = addr_to_id.get(addr)
+                    if pid is None or pid not in players:
+                        continue
+
+                    p = players[pid]
+                    if now - p["last_shot"] < SHOOT_COOLDOWN:
+                        continue
+
+                    dx = float(msg.get("dx", 0.0))
+                    dy = float(msg.get("dy", 0.0))
+                    length = math.hypot(dx, dy)
+                    if length < 1e-6:
+                        continue
+                    dx /= length
+                    dy /= length
+
+                    projectiles[next_projectile_id] = {
+                        "x": p["x"],
+                        "y": p["y"],
+                        "vx": dx * PROJECTILE_SPEED,
+                        "vy": dy * PROJECTILE_SPEED,
+                        "color": p["color"],
+                        "ttl": PROJECTILE_LIFETIME,
+                        "owner": pid,
+                    }
+                    p["last_shot"] = now
+                    next_projectile_id += 1
+
                 elif mtype == "leave":
                     pid = addr_to_id.pop(addr, None)
                     if pid is not None:
                         players.pop(pid, None)
                         print(f"[SERVER] {addr} (id={pid}) left")
 
-            # --- 2. ТИК И РАССЫЛКА ---
+            # --- 2. ТИК ---
             if now - last_tick >= TICK_DT:
                 dt = now - last_tick
                 last_tick = now
 
+                # игроки
                 for p in players.values():
                     p["x"] = clamp(p["x"] + p["dx"] * PLAYER_SPEED * dt, 0, WIDTH)
                     p["y"] = clamp(p["y"] + p["dy"] * PLAYER_SPEED * dt, 0, HEIGHT)
 
+                # снаряды
+                for pr_id in list(projectiles.keys()):
+                    pr = projectiles[pr_id]
+                    pr["x"] += pr["vx"] * dt
+                    pr["y"] += pr["vy"] * dt
+                    pr["ttl"] -= dt
+
+                    if (pr["ttl"] <= 0
+                            or pr["x"] < 0 or pr["x"] > WIDTH
+                            or pr["y"] < 0 or pr["y"] > HEIGHT):
+                        del projectiles[pr_id]
+
+                # --- 3. РАССЫЛКА ---
                 state = {
                     "type": "state",
                     "players": [
                         {"id": pid, "x": p["x"], "y": p["y"],
                          "color": list(p["color"])}
                         for pid, p in players.items()
+                    ],
+                    "projectiles": [
+                        {"id": pr_id,
+                         "x": pr["x"], "y": pr["y"],
+                         "vx": pr["vx"], "vy": pr["vy"],
+                         "color": list(pr["color"])}
+                        for pr_id, pr in projectiles.items()
                     ],
                 }
                 payload = json.dumps(state).encode("utf-8")
