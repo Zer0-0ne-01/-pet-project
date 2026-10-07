@@ -10,8 +10,19 @@ BUFFER_SIZE = 2048
 NET_HOST = "0.0.0.0"
 NET_PORT = 9999
 NET_TICK_DT = 1.0 / 30.0           # серверный тик — 30 Гц
-NET_PLAYER_SPEED = 300.0           # px/s — серверная скорость игрока
-NET_PLAYER_RADIUS = 20             # визуальный радиус кружка у клиента
+
+# --- СЕТЕВОЙ ИГРОК: ФИЗИКА ---
+NET_PLAYER_SPEED = 300.0           # горизонтальная скорость, px/s
+
+PLAYER_W = 30                      # ширина AABB игрока
+PLAYER_H = 60                      # высота AABB игрока
+
+GRAVITY = 1800.0                   # px/s²
+JUMP_SPEED = 650.0                 # начальная вертикальная скорость прыжка, px/s
+MAX_FALL_SPEED = 1200.0            # ограничение скорости падения
+
+COYOTE_TIME = 0.10                 # сек — «прощение» прыжка после схода с платформы
+JUMP_BUFFER_TIME = 0.12            # сек — «память» о нажатии прыжка в воздухе
 
 NET_COLORS = [
     (80, 200, 120),
@@ -22,7 +33,13 @@ NET_COLORS = [
     (80, 220, 220),
 ]
 
-# --- ЛОКАЛЬНАЯ ИГРА (offline, single-player) ---
+# --- СНАРЯДЫ ---
+PROJECTILE_SPEED = 700.0           # px/s
+PROJECTILE_LIFETIME = 1.5          # сек до самоуничтожения
+PROJECTILE_RADIUS = 6              # визуальный радиус
+SHOOT_COOLDOWN = 0.20              # сек между выстрелами
+
+# --- ЛОКАЛЬНАЯ ИГРА (offline, не менялась) ---
 LOCAL_BG_COLOR = (30, 30, 60)
 LOCAL_PLAYER_SIZE = 50
 LOCAL_PLAYER_SPEED = 5

@@ -23,3 +23,22 @@ python -m venv .venv
 source .venv/bin/activate
 
 pip install pygame
+
+```
+Shuffling/
+├── README.md
+├── shared/
+│   ├── __init__.py
+│   ├── config.py         # все константы
+│   └── protocol.py       # строковые типы сообщений
+├── server/
+│   ├── __init__.py
+│   └── server.py         # UDP-сервер (был "import json.txt")
+└── client/
+    ├── __init__.py
+    ├── ui.py             # Button, draw_hud, draw_crosshair
+    ├── main_menu.py      # run_menu
+    ├── local_game.py     # Player, Enemy, run_game (локальная игра)
+    ├── client.py         # сетевой клиент (был client.py.txt)
+    └── main.py           # точка входа клиента
+```
