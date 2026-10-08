@@ -24,10 +24,11 @@ from shared.config import (
     PLAYER_W, PLAYER_H,
     PROJECTILE_RADIUS,
     SHOOT_COOLDOWN,
+    NET_JOIN_RETRY,
 )
 from shared.protocol import (
     MSG_JOIN, MSG_INPUT, MSG_SHOOT, MSG_LEAVE,
-    MSG_WELCOME, MSG_STATE,
+    MSG_REJECT, MSG_WELCOME, MSG_STATE,
 )
 from shared.level import get_platforms
 from client.ui import draw_crosshair
@@ -42,11 +43,16 @@ PLATFORM_TOP_COLOR = (100, 100, 160)
 class RemotePlayer:
     """Сглаженное представление игрока в клиенте (интерполяция)."""
 
-    def __init__(self, pid, x, y, color, facing, on_ground, now):
+    def __init__(self, pid, x, y, color, facing, on_ground, now,
+                 name="player", hp=100, alive=True, score=0):
         self.pid = pid
         self.color = color
         self.facing = facing
         self.on_ground = on_ground
+        self.name = name
+        self.hp = hp
+        self.alive = alive
+        self.score = score
 
         self.prev_x = x
         self.prev_y = y
@@ -54,7 +60,8 @@ class RemotePlayer:
         self.target_y = y
         self.snapshot_time = now
 
-    def push_snapshot(self, x, y, color, facing, on_ground, now):
+    def push_snapshot(self, x, y, color, facing, on_ground, now,
+                      name, hp, alive, score):
         t = min(1.0, (now - self.snapshot_time) / SERVER_TICK_DT)
         self.prev_x += (self.target_x - self.prev_x) * t
         self.prev_y += (self.target_y - self.prev_y) * t
@@ -64,6 +71,10 @@ class RemotePlayer:
         self.color = color
         self.facing = facing
         self.on_ground = on_ground
+        self.name = name
+        self.hp = hp
+        self.alive = alive
+        self.score = score
 
     def render_pos(self, now):
         t = min(1.0, (now - self.snapshot_time) / SERVER_TICK_DT)
@@ -106,24 +117,23 @@ def draw_platforms(screen, platforms):
         )
 
 
-def draw_player(screen, x, y, color, facing, is_me):
+def draw_player(screen, x, y, color, facing, is_me, name, hp, alive, font):
     """Капсула 30×60 с обводкой для себя и «глазом» со стороны facing."""
     cx, cy = int(x), int(y)
     rect = pygame.Rect(cx - PLAYER_W // 2, cy - PLAYER_H // 2, PLAYER_W, PLAYER_H)
+    if not alive:
+        return
 
-    # тело — прямоугольник со скруглёнными углами радиусом = половина ширины
     pygame.draw.rect(screen, color, rect, border_radius=PLAYER_W // 2)
-
-    # обводка для себя
     if is_me:
         pygame.draw.rect(screen, (255, 255, 255), rect, 2,
                          border_radius=PLAYER_W // 2)
-
-    # «глаз» — куда смотрит
     eye_x = cx + facing * 7
     eye_y = cy - PLAYER_H // 4
     pygame.draw.circle(screen, (255, 255, 255), (eye_x, eye_y), 4)
     pygame.draw.circle(screen, (20, 20, 30), (eye_x, eye_y), 2)
+    label = font.render(f"{name}  {hp} HP", True, (255, 255, 255))
+    screen.blit(label, label.get_rect(midbottom=(cx, rect.top - 5)))
 
 
 def draw_projectile(screen, x, y, color):
@@ -142,195 +152,238 @@ def draw_projectile(screen, x, y, color):
 
 def run_client(host="127.0.0.1", port=9999, name="player"):
     server_addr = (host, port)
-
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setblocking(False)
-
     pygame.init()
     screen = pygame.display.set_mode((WIDTH, HEIGHT))
     pygame.display.set_caption(f"Shuffling — {name}")
-    pygame.mouse.set_visible(False)          # у нас свой прицел
+    pygame.mouse.set_visible(False)
     clock = pygame.time.Clock()
     font = pygame.font.SysFont("consolas", 20)
-
     platforms = get_platforms()
-
-    # --- join (трижды, чтобы пережить потерю первого пакета) ---
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setblocking(False)
     join_payload = json.dumps({"type": MSG_JOIN, "name": name}).encode("utf-8")
-    for _ in range(3):
-        sock.sendto(join_payload, server_addr)
-        time.sleep(0.05)
-
     my_id = None
-    players = {}         # id -> RemotePlayer
-    projectiles = {}     # id -> RemoteProjectile
+    players = {}
+    projectiles = {}
     last_shot_time = 0.0
-
+    next_join_time = 0.0
+    last_state_time = time.monotonic()
+    phase = "connecting"
+    round_number = 0
+    winner_id = None
+    error_message = None
+    quit_requested = False
     running = True
-    while running:
-        now = time.time()
-
-        # --- 1. СОБЫТИЯ ---
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
-            elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-                running = False
-            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                # ЛКМ — выстрел в направлении мыши
-                if my_id is not None and (now - last_shot_time) >= SHOOT_COOLDOWN:
-                    me = players.get(my_id)
-                    if me is not None:
-                        px, py = me.render_pos(now)
-                        mx, my = pygame.mouse.get_pos()
-                        ddx, ddy = mx - px, my - py
-                        length = math.hypot(ddx, ddy)
-                        if length > 1e-6:
-                            ddx /= length
-                            ddy /= length
-                            try:
-                                sock.sendto(
-                                    json.dumps({
-                                        "type": MSG_SHOOT,
-                                        "dx": ddx, "dy": ddy,
-                                    }).encode("utf-8"),
-                                    server_addr,
-                                )
-                                last_shot_time = now
-                            except OSError as e:
-                                print(f"[CLIENT] shoot send error: {e}")
-
-        # --- 2. ВВОД ---
-        keys = pygame.key.get_pressed()
-        dx = int(keys[pygame.K_d]) - int(keys[pygame.K_a])
-        jump = bool(keys[pygame.K_SPACE])
-
-        # facing — по мыши относительно моего игрока
-        facing = 1
-        if my_id is not None and my_id in players:
-            px, py = players[my_id].render_pos(now)
-            mx, _my = pygame.mouse.get_pos()
-            facing = 1 if mx >= px else -1
-
-        try:
-            sock.sendto(
-                json.dumps({
-                    "type": MSG_INPUT,
-                    "dx": dx,
-                    "jump": jump,
-                    "facing": facing,
-                }).encode("utf-8"),
-                server_addr,
-            )
-        except OSError as e:
-            print(f"[CLIENT] send error: {e}")
-
-        # --- 3. ПРИЁМ ---
-        while True:
-            try:
-                data, addr = sock.recvfrom(BUFFER_SIZE)
-            except BlockingIOError:
-                break
-            except OSError as e:
-                print(f"[CLIENT] recv error: {e}")
-                break
-
-            try:
-                msg = json.loads(data.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                continue
-
-            mtype = msg.get("type")
-
-            if mtype == MSG_WELCOME:
-                my_id = msg["id"]
-                print(f"[CLIENT] joined as id={my_id}")
-
-            elif mtype == MSG_STATE:
-                # --- игроки ---
-                incoming_ids = set()
-                for entry in msg.get("players", []):
-                    pid = entry["id"]
-                    x = float(entry["x"])
-                    y = float(entry["y"])
-                    color = tuple(entry["color"])
-                    facing = int(entry.get("facing", 1))
-                    on_ground = bool(entry.get("on_ground", False))
-                    incoming_ids.add(pid)
-
-                    rp = players.get(pid)
-                    if rp is None:
-                        players[pid] = RemotePlayer(pid, x, y, color,
-                                                    facing, on_ground, now)
-                    else:
-                        rp.push_snapshot(x, y, color, facing, on_ground, now)
-
-                for pid in list(players.keys()):
-                    if pid not in incoming_ids:
-                        del players[pid]
-
-                # --- снаряды ---
-                incoming_proj = set()
-                for entry in msg.get("projectiles", []):
-                    pr_id = entry["id"]
-                    incoming_proj.add(pr_id)
-                    rp = projectiles.get(pr_id)
-                    if rp is None:
-                        projectiles[pr_id] = RemoteProjectile(
-                            pr_id,
-                            float(entry["x"]), float(entry["y"]),
-                            float(entry["vx"]), float(entry["vy"]),
-                            tuple(entry["color"]),
-                            now,
-                        )
-                    else:
-                        rp.push_snapshot(
-                            float(entry["x"]), float(entry["y"]),
-                            float(entry["vx"]), float(entry["vy"]),
-                            tuple(entry["color"]),
-                            now,
-                        )
-
-                for pr_id in list(projectiles.keys()):
-                    if pr_id not in incoming_proj:
-                        del projectiles[pr_id]
-
-        # --- 4. РИСОВАНИЕ ---
-        screen.fill(BG_COLOR)
-        draw_platforms(screen, platforms)
-
-        # игроки
-        for pid, rp in players.items():
-            x, y = rp.render_pos(now)
-            draw_player(screen, x, y, rp.color, rp.facing, pid == my_id)
-
-        # снаряды
-        for pr in projectiles.values():
-            x, y = pr.render_pos(now)
-            draw_projectile(screen, x, y, pr.color)
-
-        # прицел
-        draw_crosshair(screen, pygame.mouse.get_pos())
-
-        # подсказки
-        hint = font.render(
-            "A/D — движение, Space — прыжок, ЛКМ — выстрел, Esc — выход",
-            True, (255, 255, 255),
-        )
-        screen.blit(hint, (20, 20))
-
-        status = f"id: {my_id}   players: {len(players)}   bullets: {len(projectiles)}"
-        screen.blit(font.render(status, True, (220, 220, 220)), (20, 50))
-
-        pygame.display.flip()
-        clock.tick(FPS)
-
     try:
-        sock.sendto(json.dumps({"type": MSG_LEAVE}).encode("utf-8"), server_addr)
-    except OSError:
-        pass
-    sock.close()
-    pygame.quit()
+        while running:
+            now = time.monotonic()
+            if my_id is None:
+                if now >= next_join_time:
+                    try:
+                        sock.sendto(join_payload, server_addr)
+                    except OSError as error:
+                        error_message = f"Не удалось подключиться: {error}"
+                        running = False
+                    next_join_time = now + NET_JOIN_RETRY
+                if now - last_state_time > 12.0:
+                    error_message = "Нет ответа от сервера. Проверьте адрес и порт."
+                    running = False
+            elif now - last_state_time > 8.0:
+                error_message = "Потеряно соединение с сервером."
+                running = False
+
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    quit_requested = True
+                    running = False
+                elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                    running = False
+                elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    if my_id is not None and now - last_shot_time >= SHOOT_COOLDOWN:
+                        me = players.get(my_id)
+                        if me is not None and me.alive:
+                            px, py = me.render_pos(now)
+                            mx, my = pygame.mouse.get_pos()
+                            dx, dy = mx - px, my - py
+                            length = math.hypot(dx, dy)
+                            if length > 1e-6:
+                                try:
+                                    sock.sendto(json.dumps({
+                                        "type": MSG_SHOOT,
+                                        "dx": dx / length, "dy": dy / length,
+                                    }).encode("utf-8"), server_addr)
+                                    last_shot_time = now
+                                except OSError as error:
+                                    print(f"[CLIENT] shoot send error: {error}")
+
+            keys = pygame.key.get_pressed()
+            dx = int(keys[pygame.K_d]) - int(keys[pygame.K_a])
+            jump = bool(keys[pygame.K_SPACE])
+            facing = 1
+            me = players.get(my_id)
+            if me is not None:
+                px, _ = me.render_pos(now)
+                facing = 1 if pygame.mouse.get_pos()[0] >= px else -1
+            if my_id is not None:
+                try:
+                    sock.sendto(json.dumps({
+                        "type": MSG_INPUT, "dx": dx, "jump": jump, "facing": facing,
+                    }).encode("utf-8"), server_addr)
+                except OSError as error:
+                    print(f"[CLIENT] input send error: {error}")
+
+            while True:
+                try:
+                    data, address = sock.recvfrom(BUFFER_SIZE)
+                except BlockingIOError:
+                    break
+                except OSError as error:
+                    print(f"[CLIENT] receive error: {error}")
+                    break
+                if address != server_addr:
+                    continue
+                try:
+                    message = json.loads(data.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(message, dict):
+                    continue
+                if message.get("type") == MSG_REJECT:
+                    error_message = "На сервере нет свободных мест (максимум 4)."
+                    running = False
+                    continue
+                if message.get("type") == MSG_WELCOME:
+                    received_id = message.get("id")
+                    if isinstance(received_id, int) and not isinstance(received_id, bool):
+                        my_id = received_id
+                        last_state_time = now
+                elif message.get("type") == MSG_STATE:
+                    try:
+                        phase = message["phase"]
+                        round_number = int(message["round"])
+                        winner_id = message.get("winner_id")
+                        incoming_ids = set()
+                        for entry in message["players"]:
+                            player_id = int(entry["id"])
+                            x, y = float(entry["x"]), float(entry["y"])
+                            color = tuple(entry["color"])
+                            facing = int(entry["facing"])
+                            on_ground = bool(entry["on_ground"])
+                            player_name = str(entry["name"])
+                            hp = int(entry["hp"])
+                            alive = bool(entry["alive"])
+                            score = int(entry["score"])
+                            if not math.isfinite(x) or not math.isfinite(y):
+                                continue
+                            incoming_ids.add(player_id)
+                            remote = players.get(player_id)
+                            if remote is None:
+                                players[player_id] = RemotePlayer(
+                                    player_id, x, y, color, facing, on_ground, now,
+                                    player_name, hp, alive, score,
+                                )
+                            else:
+                                remote.push_snapshot(
+                                    x, y, color, facing, on_ground, now,
+                                    player_name, hp, alive, score,
+                                )
+                        for player_id in list(players):
+                            if player_id not in incoming_ids:
+                                del players[player_id]
+
+                        incoming_projectiles = set()
+                        for entry in message["projectiles"]:
+                            projectile_id = int(entry["id"])
+                            incoming_projectiles.add(projectile_id)
+                            projectile = projectiles.get(projectile_id)
+                            values = (
+                                float(entry["x"]), float(entry["y"]),
+                                float(entry["vx"]), float(entry["vy"]),
+                            )
+                            if not all(math.isfinite(value) for value in values):
+                                continue
+                            if projectile is None:
+                                projectiles[projectile_id] = RemoteProjectile(
+                                    projectile_id, *values, tuple(entry["color"]), now,
+                                )
+                            else:
+                                projectile.push_snapshot(
+                                    *values, tuple(entry["color"]), now,
+                                )
+                        for projectile_id in list(projectiles):
+                            if projectile_id not in incoming_projectiles:
+                                del projectiles[projectile_id]
+                        last_state_time = now
+                    except (KeyError, TypeError, ValueError, OverflowError) as error:
+                        print(f"[CLIENT] invalid state packet: {error}")
+
+            screen.fill(BG_COLOR)
+            draw_platforms(screen, platforms)
+            for player_id, remote in players.items():
+                x, y = remote.render_pos(now)
+                draw_player(
+                    screen, x, y, remote.color, remote.facing,
+                    player_id == my_id, remote.name, remote.hp, remote.alive, font,
+                )
+            for projectile in projectiles.values():
+                x, y = projectile.render_pos(now)
+                draw_projectile(screen, x, y, projectile.color)
+
+            scoreboard = "   ".join(
+                f"{remote.name}: {remote.score}" for remote in players.values()
+            )
+            screen.blit(font.render(f"Раунд {round_number}   {scoreboard}", True,
+                                    (255, 255, 255)), (20, 20))
+            status_text = {
+                "connecting": "Подключение...",
+                "waiting": "Ожидание второго игрока...",
+                "round_over": "Раунд окончен",
+                "match_over": "Матч окончен",
+            }.get(phase)
+            if status_text:
+                if winner_id in players:
+                    status_text += f": победил {players[winner_id].name}"
+                banner = font.render(status_text, True, (255, 230, 120))
+                screen.blit(banner, banner.get_rect(center=(WIDTH // 2, HEIGHT // 2)))
+            hint = font.render(
+                "A/D — движение, Space — прыжок, ЛКМ — выстрел, Esc — выход",
+                True, (255, 255, 255),
+            )
+            screen.blit(hint, (20, HEIGHT - 34))
+            if error_message:
+                error = font.render(error_message, True, (255, 100, 100))
+                screen.blit(error, error.get_rect(center=(WIDTH // 2, HEIGHT // 2 + 40)))
+            if my_id is not None:
+                draw_crosshair(screen, pygame.mouse.get_pos())
+            pygame.display.flip()
+            clock.tick(FPS)
+    finally:
+        if my_id is not None:
+            try:
+                sock.sendto(json.dumps({"type": MSG_LEAVE}).encode("utf-8"), server_addr)
+            except OSError:
+                pass
+        sock.close()
+        pygame.mouse.set_visible(True)
+    if error_message and not quit_requested:
+        while True:
+            dismissed = False
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    quit_requested = True
+                    dismissed = True
+                elif event.type == pygame.KEYDOWN:
+                    dismissed = True
+            if dismissed:
+                break
+            screen.fill(BG_COLOR)
+            message = font.render(error_message, True, (255, 120, 120))
+            screen.blit(message, message.get_rect(center=(WIDTH // 2, HEIGHT // 2 - 15)))
+            hint = font.render("Нажмите любую клавишу для возврата", True, (220, 220, 220))
+            screen.blit(hint, hint.get_rect(center=(WIDTH // 2, HEIGHT // 2 + 25)))
+            pygame.display.flip()
+            clock.tick(FPS)
+    return "__quit__" if quit_requested else error_message
 
 
 def main():

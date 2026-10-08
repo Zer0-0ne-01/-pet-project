@@ -6,10 +6,16 @@ WIDTH, HEIGHT = 1024, 768
 FPS = 60
 
 # --- СЕТЬ ---
-BUFFER_SIZE = 2048
+BUFFER_SIZE = 8192
 NET_HOST = "0.0.0.0"
 NET_PORT = 9999
 NET_TICK_DT = 1.0 / 30.0           # серверный тик — 30 Гц
+NET_MAX_PLAYERS = 4
+NET_PLAYER_TIMEOUT = 10.0
+NET_JOIN_RETRY = 1.0
+ROUND_END_DELAY = 3.0
+MATCH_END_DELAY = 6.0
+MATCH_WINS = 3
 
 # --- СЕТЕВОЙ ИГРОК: ФИЗИКА ---
 NET_PLAYER_SPEED = 300.0           # горизонтальная скорость, px/s
@@ -38,6 +44,9 @@ PROJECTILE_SPEED = 700.0           # px/s
 PROJECTILE_LIFETIME = 1.5          # сек до самоуничтожения
 PROJECTILE_RADIUS = 6              # визуальный радиус
 SHOOT_COOLDOWN = 0.20              # сек между выстрелами
+PROJECTILE_DAMAGE = 25
+PROJECTILE_KNOCKBACK = 420.0
+PLAYER_MAX_HP = 100
 
 # --- ЛОКАЛЬНАЯ ИГРА (offline, не менялась) ---
 LOCAL_BG_COLOR = (30, 30, 60)

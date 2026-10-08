@@ -10,3 +10,4 @@ MSG_LEAVE = "leave"
 # сервер → клиент
 MSG_WELCOME = "welcome"
 MSG_STATE = "state"
+MSG_REJECT = "reject"
