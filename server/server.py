@@ -2,6 +2,7 @@
 
 import json
 import math
+import random
 import socket
 import time
 
@@ -11,13 +12,15 @@ from shared.config import (
     NET_HOST, NET_MAX_PLAYERS, NET_PLAYER_SPEED, NET_PLAYER_TIMEOUT,
     NET_PORT, NET_TICK_DT, PLAYER_H, PLAYER_MAX_HP, PLAYER_W,
     PROJECTILE_DAMAGE, PROJECTILE_KNOCKBACK, PROJECTILE_LIFETIME,
-    PROJECTILE_SPEED, ROUND_END_DELAY, SHOOT_COOLDOWN, WIDTH,
+    PROJECTILE_SPEED, ROUND_END_DELAY, SHOOT_COOLDOWN,
+    UPGRADE_DRAFT_TIMEOUT, WIDTH,
 )
-from shared.level import get_platforms
+from shared.level import MAPS, get_map
 from shared.protocol import (
     MSG_INPUT, MSG_JOIN, MSG_LEAVE, MSG_REJECT, MSG_SHOOT, MSG_STATE,
-    MSG_WELCOME,
+    MSG_PROFILE, MSG_START, MSG_UPGRADE, MSG_WELCOME,
 )
+from shared.upgrades import get_upgrade_choices
 
 
 def clamp(value, low, high):
@@ -70,10 +73,16 @@ def step_player(player, dt, platforms):
     if player["input_jump"] and not player["jump_was_pressed"]:
         player["jump_buffer"] = JUMP_BUFFER_TIME
     player["jump_was_pressed"] = player["input_jump"]
-    if player["jump_buffer"] > 0 and player["coyote_timer"] > 0:
+    can_ground_jump = player["coyote_timer"] > 0 and player["jump_count"] == 0
+    can_double_jump = (
+        player["upgrades"].get("double_jump", 0) > 0
+        and player["jump_count"] < 2
+    )
+    if player["jump_buffer"] > 0 and (can_ground_jump or can_double_jump):
         player["vy"] = -JUMP_SPEED
         player["jump_buffer"] = 0
         player["coyote_timer"] = 0
+        player["jump_count"] += 1
     player["vy"] = min(player["vy"] + GRAVITY * dt, MAX_FALL_SPEED)
     x, y, vx, vy, grounded = move_and_collide(
         player["x"], player["y"], player["vx"], player["vy"], dt, platforms,
@@ -83,6 +92,8 @@ def step_player(player, dt, platforms):
         vx = 0.0
     x = bounded_x
     player.update(x=x, y=y, vx=vx, vy=vy, on_ground=grounded)
+    if grounded:
+        player["jump_count"] = 0
     player["coyote_timer"] = COYOTE_TIME if grounded else max(
         0.0, player["coyote_timer"] - dt,
     )
@@ -99,7 +110,9 @@ class GameServer:
     """Хранит состояние игры и обрабатывает проверенные клиентские сообщения."""
 
     def __init__(self):
-        self.platforms = get_platforms()
+        self.map_id = MAPS[0].map_id
+        self.platforms = get_map(self.map_id).platforms
+        self.previous_map_id = None
         self.players = {}
         self.addr_to_id = {}
         self.projectiles = {}
@@ -108,6 +121,8 @@ class GameServer:
         self.round_number = 0
         self.phase = "waiting"
         self.winner_id = None
+        self.match_winner_id = None
+        self.draft_player_ids = set()
         self.phase_until = 0.0
 
     def _welcome(self, sock, address, player_id):
@@ -124,7 +139,7 @@ class GameServer:
             pass
 
     def _new_player(self, player_id, address, name, now):
-        color = NET_COLORS[(player_id - 1) % len(NET_COLORS)]
+        color = self._available_color()
         spawn_x = 180 + (len(self.players) % NET_MAX_PLAYERS) * (
             (WIDTH - 360) / max(1, NET_MAX_PLAYERS - 1)
         )
@@ -136,7 +151,15 @@ class GameServer:
             "color": color, "last_shot": 0.0, "last_seen": now,
             "name": name, "hp": PLAYER_MAX_HP, "alive": False, "score": 0,
             "address": address, "knockback_x": 0.0, "knockback_timer": 0.0,
+            "jump_count": 0, "upgrades": {},
+            "upgrade_choices": [], "upgrade_selected": True,
         }
+
+    def _available_color(self, requested=None):
+        used = {player["color"] for player in self.players.values()}
+        if requested is not None and requested not in used:
+            return requested
+        return next((color for color in NET_COLORS if color not in used), None)
 
     def handle_message(self, sock, message, address, now):
         if not isinstance(message, dict):
@@ -149,6 +172,9 @@ class GameServer:
                 self.players[player_id]["last_seen"] = now
                 self._welcome(sock, address, player_id)
                 return
+            if self.phase != "waiting":
+                self._send(sock, address, {"type": MSG_REJECT, "reason": "game_started"})
+                return
             if len(self.players) >= NET_MAX_PLAYERS:
                 self._send(sock, address, {"type": MSG_REJECT, "reason": "server_full"})
                 return
@@ -156,14 +182,34 @@ class GameServer:
             if not isinstance(name, str):
                 return
             name = "".join(c for c in name.strip() if c.isprintable())[:16] or "player"
+            requested_color = message.get("color")
+            if requested_color is not None:
+                if (not isinstance(requested_color, list) or len(requested_color) != 3
+                        or any(isinstance(channel, bool) or not isinstance(channel, int)
+                               or not 0 <= channel <= 255 for channel in requested_color)):
+                    self._send(sock, address, {"type": MSG_REJECT, "reason": "invalid_color"})
+                    return
+                requested_color = tuple(requested_color)
+                if requested_color not in NET_COLORS:
+                    self._send(sock, address, {"type": MSG_REJECT, "reason": "invalid_color"})
+                    return
+                if requested_color in {p["color"] for p in self.players.values()}:
+                    self._send(sock, address, {
+                        "type": MSG_REJECT, "reason": "color_taken",
+                        "available_colors": [
+                            list(color) for color in NET_COLORS
+                            if color not in {p["color"] for p in self.players.values()}
+                        ],
+                    })
+                    return
             player_id = self.next_id
             self.next_id += 1
             self.addr_to_id[address] = player_id
             self._new_player(player_id, address, name, now)
+            if requested_color is not None:
+                self.players[player_id]["color"] = requested_color
             self._welcome(sock, address, player_id)
             print(f"[SERVER] {address} joined as {name!r} (id={player_id})")
-            if self.phase == "waiting" and len(self.players) >= 2:
-                self._start_round()
             return
 
         if player_id is None:
@@ -199,11 +245,47 @@ class GameServer:
                 "x": player["x"], "y": player["y"], "vx": dx * PROJECTILE_SPEED,
                 "vy": dy * PROJECTILE_SPEED, "color": player["color"],
                 "ttl": PROJECTILE_LIFETIME, "owner": player_id,
+                "damage_level": player["upgrades"].get("power_shot", 0),
             }
             self.next_projectile_id += 1
             player["last_shot"] = now
         elif kind == MSG_LEAVE:
             self.remove_player(player_id)
+        elif kind == MSG_PROFILE and self.phase == "waiting":
+            name = message.get("name", player["name"])
+            requested_color = message.get("color")
+            if not isinstance(name, str):
+                return
+            if (not isinstance(requested_color, list) or len(requested_color) != 3
+                    or any(isinstance(channel, bool) or not isinstance(channel, int)
+                           or not 0 <= channel <= 255 for channel in requested_color)):
+                return
+            requested_color = tuple(requested_color)
+            if requested_color not in NET_COLORS:
+                return
+            if requested_color in {
+                    other["color"] for other_id, other in self.players.items()
+                    if other_id != player_id}:
+                self._send(sock, address, {"type": MSG_REJECT, "reason": "color_taken"})
+                return
+            player["name"] = "".join(c for c in name.strip() if c.isprintable())[:16] or "player"
+            player["color"] = requested_color
+        elif kind == MSG_START:
+            if (self.phase == "waiting" and len(self.players) >= 2
+                    and player_id == min(self.players)):
+                self._start_round()
+        elif kind == MSG_UPGRADE:
+            upgrade_id = message.get("upgrade")
+            if (self.phase != "draft" or player_id not in self.draft_player_ids
+                    or player["upgrade_selected"]
+                    or not isinstance(upgrade_id, str)
+                    or upgrade_id not in {
+                        card["id"] for card in player["upgrade_choices"]
+                    }):
+                return
+            player["upgrades"][upgrade_id] = player["upgrades"].get(upgrade_id, 0) + 1
+            player["upgrade_selected"] = True
+            self._finish_draft_if_ready(now)
 
     def remove_player(self, player_id):
         player = self.players.pop(player_id, None)
@@ -216,6 +298,9 @@ class GameServer:
         }
         if self.phase == "playing":
             self._check_round_end(time.monotonic())
+        elif self.phase == "draft":
+            self.draft_player_ids.discard(player_id)
+            self._finish_draft_if_ready(time.monotonic())
         if len(self.players) < 2 and self.phase != "match_over":
             self.phase = "waiting"
             self.winner_id = None
@@ -225,21 +310,64 @@ class GameServer:
         self.round_number += 1
         self.phase = "playing"
         self.winner_id = None
+        self.match_winner_id = None
         self.projectiles.clear()
+        available_maps = [
+            game_map for game_map in MAPS
+            if game_map.map_id != self.previous_map_id
+        ]
+        selected_map = random.choice(available_maps)
+        self.map_id = selected_map.map_id
+        self.previous_map_id = self.map_id
+        self.platforms = selected_map.platforms
         for index, player in enumerate(self.players.values()):
             player.update(
                 x=float(180 + index * (WIDTH - 360) / max(1, len(self.players) - 1)),
                 y=100.0, vx=0.0, vy=0.0, hp=PLAYER_MAX_HP, alive=True,
                 input_dx=0, input_jump=False, coyote_timer=0.0, jump_buffer=0.0,
                 jump_was_pressed=False,
+                jump_count=0,
                 knockback_x=0.0, knockback_timer=0.0,
+                upgrade_choices=[], upgrade_selected=True,
             )
 
     def _finish_round(self, winner_id, now):
-        self.phase = "match_over" if winner_id is not None and self.players[winner_id]["score"] >= MATCH_WINS else "round_over"
         self.winner_id = winner_id
-        self.phase_until = now + (MATCH_END_DELAY if self.phase == "match_over" else ROUND_END_DELAY)
+        self.match_winner_id = (
+            winner_id
+            if winner_id is not None and self.players[winner_id]["score"] >= MATCH_WINS
+            else None
+        )
+        self.phase = "draft"
+        self.phase_until = now + UPGRADE_DRAFT_TIMEOUT
         self.projectiles.clear()
+        self.draft_player_ids = set(self.players) - ({winner_id} if winner_id else set())
+        for player_id, player in self.players.items():
+            player["upgrade_choices"] = (
+                get_upgrade_choices(player["upgrades"])
+                if player_id in self.draft_player_ids else []
+            )
+            player["upgrade_selected"] = (
+                player_id not in self.draft_player_ids
+                or not player["upgrade_choices"]
+            )
+        self._finish_draft_if_ready(now)
+
+    def _finish_draft_if_ready(self, now):
+        if self.phase != "draft" or any(
+                not self.players[player_id]["upgrade_selected"]
+                for player_id in self.draft_player_ids if player_id in self.players):
+            return
+        self.draft_player_ids.clear()
+        if self.match_winner_id is not None:
+            self.phase = "match_over"
+            self.phase_until = now + MATCH_END_DELAY
+        elif len(self.players) >= 2:
+            self.phase_until = now + ROUND_END_DELAY
+            self.phase = "round_over"
+        else:
+            self.phase = "waiting"
+            self.phase_until = 0.0
 
     def _check_round_end(self, now):
         alive = [pid for pid, player in self.players.items() if player["alive"]]
@@ -255,11 +383,26 @@ class GameServer:
                 print(f"[SERVER] player {player_id} timed out")
                 self.remove_player(player_id)
 
+        if self.phase == "draft" and now >= self.phase_until:
+            for player_id in list(self.draft_player_ids):
+                player = self.players.get(player_id)
+                if player is None or player["upgrade_selected"]:
+                    continue
+                if player["upgrade_choices"]:
+                    card = random.choice(player["upgrade_choices"])
+                    upgrade_id = card["id"]
+                    player["upgrades"][upgrade_id] = (
+                        player["upgrades"].get(upgrade_id, 0) + 1
+                    )
+                player["upgrade_selected"] = True
+            self._finish_draft_if_ready(now)
+
         if self.phase in ("round_over", "match_over") and now >= self.phase_until:
             if len(self.players) >= 2:
                 if self.phase == "match_over":
                     for player in self.players.values():
                         player["score"] = 0
+                        player["upgrades"] = {}
                 self._start_round()
             else:
                 self.phase = "waiting"
@@ -290,7 +433,13 @@ class GameServer:
                             continue
                         if (abs(projectile["x"] - target["x"]) <= PLAYER_W / 2 + 6
                                 and abs(projectile["y"] - target["y"]) <= PLAYER_H / 2 + 6):
-                            target["hp"] = max(0, target["hp"] - PROJECTILE_DAMAGE)
+                            damage_level = projectile["damage_level"]
+                            armor_level = target["upgrades"].get("armor", 0)
+                            damage = max(1, round(
+                                (PROJECTILE_DAMAGE + 8 * damage_level)
+                                * (1 - 0.15 * armor_level)
+                            ))
+                            target["hp"] = max(0, target["hp"] - damage)
                             direction = 1 if projectile["vx"] >= 0 else -1
                             target["knockback_x"] = direction * PROJECTILE_KNOCKBACK
                             target["knockback_timer"] = 0.18
@@ -316,6 +465,9 @@ class GameServer:
             "phase": self.phase,
             "round": self.round_number,
             "winner_id": self.winner_id,
+            "match_winner_id": self.match_winner_id,
+            "host_id": min(self.players) if self.players else None,
+            "map_id": self.map_id,
             "players": [
                 {
                     "id": pid, "name": p["name"], "x": p["x"], "y": p["y"],
@@ -323,6 +475,9 @@ class GameServer:
                     "alive": p["alive"], "score": p["score"],
                     "on_ground": p["on_ground"], "facing": p["facing"],
                     "color": list(p["color"]),
+                    "upgrades": dict(p["upgrades"]),
+                    "upgrade_choices": p["upgrade_choices"],
+                    "upgrade_selected": p["upgrade_selected"],
                 }
                 for pid, p in self.players.items()
             ],

@@ -36,11 +36,14 @@ def main():
         elif state == "play":
             state = run_game(screen, clock, font)
         elif state == "network":
-            host = run_connect_dialog(screen, clock, font_button)
-            if host == "__quit__":
+            profile = run_connect_dialog(
+                screen, clock, font_button, socket.gethostname()[:16] or "player",
+            )
+            if profile == "__quit__":
                 state = "quit"
-            elif host is not None:
-                error = run_client(host=host, name=socket.gethostname()[:16] or "player")
+            elif profile is not None:
+                host, player_name, player_color = profile
+                error = run_client(host=host, name=player_name, color=player_color)
                 if error == "__quit__":
                     state = "quit"
                 else:

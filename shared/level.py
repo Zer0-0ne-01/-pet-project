@@ -1,13 +1,9 @@
-# shared/level.py
-"""Статичные платформы уровня.
+#level.py
+"""Арены сетевого режима, общие для клиента и авторитарного сервера."""
 
-Используется и сервером (для коллизий), и клиентом (для отрисовки),
-поэтому не зависит от pygame — только от констант.
-"""
+from typing import NamedTuple
 
-from typing import List, NamedTuple
-
-from shared.config import WIDTH, HEIGHT
+from shared.config import HEIGHT, WIDTH
 
 
 class Platform(NamedTuple):
@@ -17,21 +13,75 @@ class Platform(NamedTuple):
     h: float
 
 
-GROUND_Y = HEIGHT - 60             # верхняя граница «земли»
+class GameMap(NamedTuple):
+    map_id: str
+    name: str
+    background: tuple
+    platform_color: tuple
+    platform_top_color: tuple
+    platforms: tuple
 
 
-def get_platforms() -> List[Platform]:
-    """
-    Возвращает список платформ уровня.
+GROUND_Y = HEIGHT - 60
+ARENA_BACKGROUND = (26, 26, 36)
+PLATFORM_COLOR = (43, 44, 56)
+PLATFORM_TOP_COLOR = (78, 79, 91)
 
-    Пол — самая нижняя платформа во всю ширину экрана.
-    Платформы расставлены так, чтобы между ними был «шаг» в 88–120 px
-    по вертикали — это чуть меньше максимальной высоты прыжка
-    (JUMP_SPEED² / 2G ≈ 117 px), то есть все достижимы.
-    """
-    return [
-        Platform(0, GROUND_Y, WIDTH, 60),      # пол
-        Platform(150, 620, 180, 30),           # нижняя левая
-        Platform(780, 620, 180, 30),           # нижняя правая
-        Platform(480, 500, 200, 30),           # средняя
-    ]
+MAPS = (
+    GameMap(
+        "classic", "Классика", ARENA_BACKGROUND, PLATFORM_COLOR, PLATFORM_TOP_COLOR,
+        (
+            Platform(0, GROUND_Y, WIDTH, 60),
+            Platform(150, 620, 180, 30),
+            Platform(780, 620, 180, 30),
+            Platform(480, 510, 200, 30),
+        ),
+    ),
+    GameMap(
+        "crossfire", "Перекрёстный огонь",
+        ARENA_BACKGROUND, PLATFORM_COLOR, PLATFORM_TOP_COLOR,
+        (
+            Platform(0, GROUND_Y, WIDTH, 60),
+            Platform(95, 610, 210, 28),
+            Platform(719, 610, 210, 28),
+            Platform(407, 560, 210, 28),
+            Platform(235, 465, 180, 28),
+            Platform(609, 465, 180, 28),
+        ),
+    ),
+    GameMap(
+        "towers", "Башни", ARENA_BACKGROUND, PLATFORM_COLOR, PLATFORM_TOP_COLOR,
+        (
+            Platform(0, GROUND_Y, WIDTH, 60),
+            Platform(120, 620, 190, 28),
+            Platform(714, 620, 190, 28),
+            Platform(418, 620, 188, 28),
+            Platform(265, 510, 185, 28),
+            Platform(574, 510, 185, 28),
+        ),
+    ),
+    GameMap(
+        "high_ground", "Высота",
+        ARENA_BACKGROUND, PLATFORM_COLOR, PLATFORM_TOP_COLOR,
+        (
+            Platform(0, GROUND_Y, WIDTH, 60),
+            Platform(80, 630, 200, 28),
+            Platform(744, 630, 200, 28),
+            Platform(300, 545, 180, 28),
+            Platform(544, 545, 180, 28),
+            Platform(422, 435, 180, 28),
+        ),
+    ),
+)
+
+_MAP_BY_ID = {game_map.map_id: game_map for game_map in MAPS}
+
+
+def get_map(map_id: str) -> GameMap:
+    """Возвращает арену по ID; неизвестный ID считается ошибкой протокола."""
+    return _MAP_BY_ID[map_id]
+
+
+def get_platforms():
+    """Сохраняет старый API: платформы стартовой арены."""
+    return MAPS[0].platforms

@@ -6,6 +6,9 @@ MSG_JOIN = "join"
 MSG_INPUT = "input"
 MSG_SHOOT = "shoot"
 MSG_LEAVE = "leave"
+MSG_UPGRADE = "upgrade"
+MSG_PROFILE = "profile"
+MSG_START = "start"
 
 # сервер → клиент
 MSG_WELCOME = "welcome"
