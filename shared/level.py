@@ -23,18 +23,19 @@ class GameMap(NamedTuple):
 
 
 GROUND_Y = HEIGHT - 60
-ARENA_BACKGROUND = (26, 26, 36)
-PLATFORM_COLOR = (43, 44, 56)
-PLATFORM_TOP_COLOR = (78, 79, 91)
+# Цвета как в ROUNDS: глубокий темный фон, платформы чуть светлее
+ARENA_BACKGROUND = (24, 24, 32)
+PLATFORM_COLOR = (45, 45, 55)
+PLATFORM_TOP_COLOR = (80, 80, 95)
 
 MAPS = (
     GameMap(
         "classic", "Классика", ARENA_BACKGROUND, PLATFORM_COLOR, PLATFORM_TOP_COLOR,
         (
             Platform(0, GROUND_Y, WIDTH, 60),
-            Platform(150, 620, 180, 30),
-            Platform(780, 620, 180, 30),
-            Platform(480, 510, 200, 30),
+            Platform(150, 620, 180, 24),
+            Platform(780, 620, 180, 24),
+            Platform(480, 510, 200, 24),
         ),
     ),
     GameMap(
@@ -42,22 +43,22 @@ MAPS = (
         ARENA_BACKGROUND, PLATFORM_COLOR, PLATFORM_TOP_COLOR,
         (
             Platform(0, GROUND_Y, WIDTH, 60),
-            Platform(95, 610, 210, 28),
-            Platform(719, 610, 210, 28),
-            Platform(407, 560, 210, 28),
-            Platform(235, 465, 180, 28),
-            Platform(609, 465, 180, 28),
+            Platform(95, 610, 210, 24),
+            Platform(719, 610, 210, 24),
+            Platform(407, 560, 210, 24),
+            Platform(235, 465, 180, 24),
+            Platform(609, 465, 180, 24),
         ),
     ),
     GameMap(
         "towers", "Башни", ARENA_BACKGROUND, PLATFORM_COLOR, PLATFORM_TOP_COLOR,
         (
             Platform(0, GROUND_Y, WIDTH, 60),
-            Platform(120, 620, 190, 28),
-            Platform(714, 620, 190, 28),
-            Platform(418, 620, 188, 28),
-            Platform(265, 510, 185, 28),
-            Platform(574, 510, 185, 28),
+            Platform(120, 620, 190, 24),
+            Platform(714, 620, 190, 24),
+            Platform(418, 620, 188, 24),
+            Platform(265, 510, 185, 24),
+            Platform(574, 510, 185, 24),
         ),
     ),
     GameMap(
@@ -65,11 +66,11 @@ MAPS = (
         ARENA_BACKGROUND, PLATFORM_COLOR, PLATFORM_TOP_COLOR,
         (
             Platform(0, GROUND_Y, WIDTH, 60),
-            Platform(80, 630, 200, 28),
-            Platform(744, 630, 200, 28),
-            Platform(300, 545, 180, 28),
-            Platform(544, 545, 180, 28),
-            Platform(422, 435, 180, 28),
+            Platform(80, 630, 200, 24),
+            Platform(744, 630, 200, 24),
+            Platform(300, 545, 180, 24),
+            Platform(544, 545, 180, 24),
+            Platform(422, 435, 180, 24),
         ),
     ),
 )

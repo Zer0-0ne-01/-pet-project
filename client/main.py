@@ -1,5 +1,5 @@
 # client/main.py
-"""Точка входа клиента: меню → локальная игра → меню → …
+"""Точка входа сетевого клиента: меню → подключение к лобби → меню.
 
 Сетевой клиент запускается отдельно: `python -m client.client`.
 """
@@ -9,7 +9,6 @@ import pygame
 
 from shared.config import WIDTH, HEIGHT, FPS
 from client.main_menu import run_connect_dialog, run_menu
-from client.local_game import run_game
 from client.client import run_client
 
 
@@ -33,8 +32,6 @@ def main():
     while state != "quit":
         if state == "menu":
             state = run_menu(screen, clock, font_button)
-        elif state == "play":
-            state = run_game(screen, clock, font)
         elif state == "network":
             profile = run_connect_dialog(
                 screen, clock, font_button, socket.gethostname()[:16] or "player",
@@ -42,8 +39,15 @@ def main():
             if profile == "__quit__":
                 state = "quit"
             elif profile is not None:
-                host, player_name, player_color = profile
-                error = run_client(host=host, name=player_name, color=player_color)
+                (
+                    host, player_name, player_color, eyes_style, mouth_style,
+                    weapon_style,
+                ) = profile
+                error = run_client(
+                    host=host, name=player_name, color=player_color,
+                    eyes_style=eyes_style, mouth_style=mouth_style,
+                    weapon_style=weapon_style,
+                )
                 if error == "__quit__":
                     state = "quit"
                 else:

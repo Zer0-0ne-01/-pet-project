@@ -16,13 +16,13 @@ NET_JOIN_RETRY = 1.0
 ROUND_END_DELAY = 3.0
 UPGRADE_DRAFT_TIMEOUT = 20.0
 MATCH_END_DELAY = 6.0
-MATCH_WINS = 3
+MATCH_WINS = 2
 
 # --- СЕТЕВОЙ ИГРОК: ФИЗИКА ---
 NET_PLAYER_SPEED = 300.0           # горизонтальная скорость, px/s
 
-PLAYER_W = 44                      # ширина AABB круглого сетевого персонажа
-PLAYER_H = 44                      # высота AABB круглого сетевого персонажа
+PLAYER_W = 40                      # ширина AABB круглого сетевого персонажа (чуть меньше для стиля)
+PLAYER_H = 40                      # высота AABB круглого сетевого персонажа
 
 GRAVITY = 1800.0                   # px/s²
 JUMP_SPEED = 650.0                 # начальная вертикальная скорость прыжка, px/s
@@ -31,43 +31,38 @@ MAX_FALL_SPEED = 1200.0            # ограничение скорости п�
 COYOTE_TIME = 0.10                 # сек — «прощение» прыжка после схода с платформы
 JUMP_BUFFER_TIME = 0.12            # сек — «память» о нажатии прыжка в воздухе
 
+# Яркие, неоновые цвета как в ROUNDS
 NET_COLORS = [
-    (255, 126, 38),
-    (52, 202, 255),
-    (255, 216, 74),
-    (100, 239, 155),
-    (193, 122, 255),
-    (255, 108, 190),
+    (255, 126, 38),   # Neon Orange (Player 1)
+    (52, 202, 255),   # Cyan (Player 2)
+    (255, 216, 74),   # Yellow
+    (100, 239, 155),  # Neon Green
+    (193, 122, 255),  # Purple
+    (255, 108, 190),  # Pink
 ]
 
 # --- СНАРЯДЫ ---
 PROJECTILE_SPEED = 700.0           # px/s
+PROJECTILE_GRAVITY = 700.0         # px/s²; gravity gives shots a ballistic arc
 PROJECTILE_LIFETIME = 1.5          # сек до самоуничтожения
-PROJECTILE_RADIUS = 6              # визуальный радиус
+PROJECTILE_RADIUS = 5              # визуальный радиус (чуть меньше)
 SHOOT_COOLDOWN = 0.20              # сек между выстрелами
 PROJECTILE_DAMAGE = 25
 PROJECTILE_KNOCKBACK = 420.0
 PLAYER_MAX_HP = 100
-
-# --- ЛОКАЛЬНАЯ ИГРА (offline, не менялась) ---
-LOCAL_BG_COLOR = (30, 30, 60)
-LOCAL_PLAYER_SIZE = 50
-LOCAL_PLAYER_SPEED = 5
-LOCAL_PLAYER_MAX_HP = 100
-
-LOCAL_ENEMY_SIZE = 40
-LOCAL_ENEMY_SPEED = 3
-LOCAL_ENEMY_DAMAGE_PER_SEC = 40.0
+MAGAZINE_SIZE = 3
+RELOAD_DURATION = 1.5
+EXPLOSION_RADIUS = 90.0
 
 # --- UI: меню и HUD ---
-MENU_BG = (20, 20, 40)
+MENU_BG = (18, 18, 24)            # Темный фон меню
 UI_TEXT = (240, 240, 240)
 HP_BACK = (60, 60, 60)
 HP_FILL = (220, 60, 60)
 HP_FILL_LOW = (240, 180, 40)
 HP_BORDER = (200, 200, 200)
 
-BUTTON_BG = (60, 80, 140)
-BUTTON_BG_HOVER = (90, 120, 190)
-BUTTON_BORDER = (200, 220, 255)
+BUTTON_BG = (40, 45, 60)
+BUTTON_BG_HOVER = (70, 80, 110)
+BUTTON_BORDER = (120, 140, 180)
 BUTTON_TEXT = (255, 255, 255)

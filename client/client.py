@@ -1,8 +1,5 @@
 # client/client.py
-"""Сетевой UDP-клиент Shuffling: арена, круглые игроки и стрельба по ЛКМ.
-
-Игроки настраивают ник и цвет до подключения; хост запускает матч из лобби.
-"""
+"""Сетевой UDP-клиент Shuffling: арена, круглые игроки и стрельба по ЛКМ."""
 
 import argparse
 from collections import OrderedDict
@@ -21,24 +18,31 @@ from shared.config import (
     NET_TICK_DT as SERVER_TICK_DT,
     PLAYER_W, PLAYER_H,
     PROJECTILE_RADIUS,
+    MAGAZINE_SIZE,
     PLAYER_MAX_HP,
-    SHOOT_COOLDOWN,
     NET_JOIN_RETRY,
     NET_COLORS,
 )
+from shared.upgrades import get_max_health, get_shoot_cooldown
 from shared.protocol import (
     MSG_JOIN, MSG_INPUT, MSG_SHOOT, MSG_LEAVE,
     MSG_PROFILE, MSG_REJECT, MSG_START, MSG_UPGRADE, MSG_WELCOME, MSG_STATE,
 )
 from shared.level import get_map
-from client.ui import draw_crosshair
+from client.ui import (
+    draw_arcade_backdrop, draw_crosshair, draw_panel,
+    draw_round_scoreboard,
+)
 
 
 class RemotePlayer:
     """Сглаженное представление игрока в клиенте (интерполяция)."""
 
     def __init__(self, pid, x, y, color, facing, on_ground, now,
-                 name="player", hp=100, alive=True, score=0, upgrades=None):
+                 name="player", hp=100, alive=True, score=0, upgrades=None,
+                 ammo=MAGAZINE_SIZE, reloading=False, reload_time=0.0,
+                 reload_duration=0.0, eyes_style=0, mouth_style=0,
+                 weapon_style=0, round_streak=0, score_squares=0):
         self.pid = pid
         self.color = color
         self.facing = facing
@@ -49,8 +53,18 @@ class RemotePlayer:
         self.alive = alive
         self.score = score
         self.upgrades = upgrades or {}
+        self.ammo = ammo
+        self.reloading = reloading
+        self.reload_time = reload_time
+        self.reload_duration = reload_duration
+        self.eyes_style = eyes_style
+        self.mouth_style = mouth_style
+        self.weapon_style = weapon_style
+        self.round_streak = round_streak
+        self.score_squares = score_squares
         self.vx = 0.0
         self.vy = 0.0
+        self.anim_phase = 0.0  # Фаза для анимации ходьбы
 
         self.prev_x = x
         self.prev_y = y
@@ -59,7 +73,10 @@ class RemotePlayer:
         self.snapshot_time = now
 
     def push_snapshot(self, x, y, color, facing, on_ground, now,
-                      name, hp, alive, score, upgrades, vx, vy):
+                      name, hp, alive, score, upgrades, vx, vy,
+                      ammo, reloading, reload_time, reload_duration,
+                      eyes_style, mouth_style, weapon_style, round_streak,
+                      score_squares):
         if on_ground and not self.on_ground:
             self.landed_at = now
         t = min(1.0, (now - self.snapshot_time) / SERVER_TICK_DT)
@@ -76,6 +93,15 @@ class RemotePlayer:
         self.alive = alive
         self.score = score
         self.upgrades = upgrades
+        self.ammo = ammo
+        self.reloading = reloading
+        self.reload_time = reload_time
+        self.reload_duration = reload_duration
+        self.eyes_style = eyes_style
+        self.mouth_style = mouth_style
+        self.weapon_style = weapon_style
+        self.round_streak = round_streak
+        self.score_squares = score_squares
         self.vx = vx
         self.vy = vy
 
@@ -87,24 +113,31 @@ class RemotePlayer:
 
 
 class RemoteProjectile:
-    """Снаряд на клиенте: экстраполяция позиции (скорость постоянна)."""
+    """Снаряд на клиенте с баллистической экстраполяцией позиции."""
 
-    def __init__(self, pid, x, y, vx, vy, color, now):
+    def __init__(self, pid, x, y, vx, vy, color, effect, gravity, now):
         self.pid = pid
         self.color = color
+        self.effect = effect
+        self.gravity = gravity
         self.x, self.y = x, y
         self.vx, self.vy = vx, vy
         self.updated_at = now
 
-    def push_snapshot(self, x, y, vx, vy, color, now):
+    def push_snapshot(self, x, y, vx, vy, color, effect, gravity, now):
         self.x, self.y = x, y
         self.vx, self.vy = vx, vy
         self.color = color
+        self.effect = effect
+        self.gravity = gravity
         self.updated_at = now
 
     def render_pos(self, now):
         dt = now - self.updated_at
-        return self.x + self.vx * dt, self.y + self.vy * dt
+        return (
+            self.x + self.vx * dt,
+            self.y + self.vy * dt + 0.5 * self.gravity * dt * dt,
+        )
 
 
 # --- ОТРИСОВКА ---
@@ -125,6 +158,21 @@ def _cached_text(font, text, color):
     return surface
 
 
+def _wrap_text(font, text, max_width):
+    lines = []
+    line = ""
+    for word in text.split():
+        candidate = f"{line} {word}".strip()
+        if line and font.size(candidate)[0] > max_width:
+            lines.append(line)
+            line = word
+        else:
+            line = candidate
+    if line:
+        lines.append(line)
+    return lines
+
+
 class Particle:
     def __init__(self, x, y, vx, vy, color, size, lifetime, square):
         self.x, self.y = x, y
@@ -142,7 +190,7 @@ class ParticleSystem:
         self.surface = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
 
     def burst(self, x, y, color, count=10, speed=180.0, size=5.0):
-        remaining = max(0, 180 - len(self.particles))
+        remaining = max(0, 200 - len(self.particles))
         for _ in range(min(count, remaining)):
             angle = random.uniform(0, math.tau)
             velocity = random.uniform(speed * 0.35, speed)
@@ -151,8 +199,8 @@ class ParticleSystem:
                 math.cos(angle) * velocity,
                 math.sin(angle) * velocity,
                 color,
-                random.uniform(size * 0.55, size * 1.3),
-                random.uniform(0.22, 0.48),
+                random.uniform(size * 0.5, size * 1.5),
+                random.uniform(0.2, 0.4), # Быстро исчезают, как в ROUNDS
                 random.choice((True, False)),
             ))
 
@@ -166,175 +214,278 @@ class ParticleSystem:
             alive.append(particle)
             particle.x += particle.vx * dt
             particle.y += particle.vy * dt
-            particle.vx *= max(0.0, 1 - 2.5 * dt)
-            particle.vy = particle.vy * max(0.0, 1 - 2.5 * dt) + 260 * dt
+            particle.vx *= max(0.0, 1 - 3.0 * dt)
+            particle.vy = particle.vy * max(0.0, 1 - 3.0 * dt) + 200 * dt
             progress = particle.age / particle.lifetime
-            radius = max(1, round(particle.size * (1 - progress * 0.72)))
-            alpha = round(255 * (1 - progress) ** 1.5)
+            radius = max(1, round(particle.size * (1 - progress * 0.8)))
+            alpha = round(255 * (1 - progress) ** 2)
             color = (*particle.color, alpha)
             center = (round(particle.x), round(particle.y))
+            
+            # В ROUNDS частицы — это простые квадраты или круги
             if particle.square:
                 rect = pygame.Rect(0, 0, radius * 2, radius * 2)
                 rect.center = center
-                pygame.draw.rect(self.surface, color, rect, border_radius=1)
+                pygame.draw.rect(self.surface, color, rect)
             else:
                 pygame.gfxdraw.filled_circle(self.surface, *center, radius, color)
-                pygame.gfxdraw.aacircle(self.surface, *center, radius, color)
         self.particles = alive
         screen.blit(self.surface, (0, 0))
 
 
 @lru_cache(maxsize=48)
 def _make_glow(color, radius, alpha):
-    margin = radius * 5
+    """Кэшированное свечение для снарядов (как в ROUNDS)."""
+    margin = radius * 4
     diameter = margin * 2 + 1
     glow = pygame.Surface((diameter, diameter), pygame.SRCALPHA)
     center = (margin, margin)
-    for scale, opacity in ((2.8, 0.10), (2.1, 0.16), (1.55, 0.27), (1.0, 0.72)):
+    for scale, opacity in ((2.5, 0.1), (1.8, 0.2), (1.2, 0.4), (1.0, 0.8)):
         ring_radius = max(1, round(radius * scale))
         ring_color = (*color, round(alpha * opacity))
         pygame.gfxdraw.filled_circle(glow, *center, ring_radius, ring_color)
-        pygame.gfxdraw.aacircle(glow, *center, ring_radius, ring_color)
     return glow
-
-
-BACKGROUND_COLOR = (26, 26, 36)
 
 
 @lru_cache(maxsize=96)
 def _make_player_body(color, width, height):
-    scale = 3
-    padding = 6
-    sprite = pygame.Surface(
-        (width * scale + padding * 2, height * scale + padding * 2),
-        pygame.SRCALPHA,
-    )
-    bounds = pygame.Rect(
-        padding, padding, width * scale, height * scale,
-    )
-    pygame.draw.ellipse(sprite, (8, 8, 12), bounds)
+    scale = 4
+    body = pygame.Surface((width * scale, height * scale), pygame.SRCALPHA)
+    bounds = pygame.Rect(2 * scale, 2 * scale,
+                         (width - 4) * scale, (height - 4) * scale)
+    pygame.draw.ellipse(body, (5, 9, 20), bounds.inflate(4 * scale, 4 * scale))
+    pygame.draw.ellipse(body, color, bounds)
+    inner = bounds.inflate(-6 * scale, -6 * scale)
     pygame.draw.ellipse(
-        sprite, color,
-        bounds.inflate(-4 * scale, -4 * scale),
+        body,
+        tuple(min(255, channel + 24) for channel in color),
+        pygame.Rect(inner.x, inner.y, inner.width, max(scale, inner.height // 2)),
     )
-    return pygame.transform.smoothscale(sprite, (width, height))
+    pygame.draw.ellipse(body, (5, 9, 20), bounds, 2 * scale)
+    return pygame.transform.smoothscale(body, (width, height))
 
 
 def draw_arena_background(screen):
-    screen.fill(BACKGROUND_COLOR)
+    draw_arcade_backdrop(screen, animate=False)
 
 
 def draw_platforms(screen, platforms, platform_color, platform_top_color):
     for p in platforms:
         rect = pygame.Rect(int(p.x), int(p.y), int(p.w), int(p.h))
-        pygame.draw.rect(screen, platform_color, rect, border_radius=6)
+        pygame.draw.rect(screen, (10, 17, 31), rect, border_radius=5)
+        pygame.draw.rect(screen, (31, 45, 62), rect, 1, border_radius=5)
         pygame.draw.line(
-            screen, platform_top_color, (rect.left + 6, rect.top + 2),
-            (rect.right - 7, rect.top + 2), 2,
+            screen, platform_top_color, (rect.left + 5, rect.top + 1),
+            (rect.right - 6, rect.top + 1), 3,
+        )
+        pygame.draw.line(
+            screen, platform_color, (rect.left + 8, rect.bottom - 3),
+            (rect.right - 8, rect.bottom - 3), 1,
         )
 
 
 def draw_player(screen, x, y, color, facing, name, hp, alive, font,
                 now, vx, vy, on_ground, player_id, aim_target=None,
-                recoil=0.0, landed_at=0.0):
-    """Рисует сглаженного персонажа с простой процедурной анимацией."""
+                recoil=0.0, landed_at=0.0, max_hp=PLAYER_MAX_HP,
+                ammo=MAGAZINE_SIZE, reloading=False, reload_time=0.0,
+                reload_duration=0.0, eyes_style=0, mouth_style=0,
+                weapon_style=0):
+    """Рисует персонажа в стиле ROUNDS: боб + палочки-конечности + пушка."""
     if not alive:
         return
 
-    radius = PLAYER_W // 2
+    # --- 1. Физика и анимация (Squash & Stretch) ---
     moving = abs(vx) > 25
-    gait_phase = now * 12 + player_id * 1.7
-    gait = math.sin(gait_phase) if moving else 0.0
-    bob = abs(math.sin(gait_phase)) * 1.5 if moving else 0.0
-    stretch = 0.12 if not on_ground and vy < -80 else 0.04 if not on_ground else 0.0
-    landing = max(0.0, 1.0 - (now - landed_at) / 0.16) if landed_at else 0.0
-    body_w = int(PLAYER_W * (1.0 - stretch * 0.35 + landing * 0.18))
-    body_h = int(PLAYER_H * (1.0 + stretch - landing * 0.22))
-    cx, cy = int(x + (vx / 300) * 2), int(y + bob)
-    rect = pygame.Rect(0, 0, body_w, body_h)
-    rect.center = (cx, cy)
-    shadow_width = max(18, int(radius * 1.8 - min(abs(vy) / 40, 14)))
-    shadow = pygame.Rect(cx - shadow_width // 2, int(y + radius - 2), shadow_width, 8)
-    pygame.draw.ellipse(screen, (13, 13, 20), shadow)
+    
+    # Анимация ходьбы (синусоида)
+    if moving and on_ground:
+        # Используем player_id для рассинхронизации анимации у разных игроков
+        gait_phase = now * 15 + player_id * 1.5
+        gait = math.sin(gait_phase)
+    else:
+        gait = 0.0
 
-    limb_color = (18, 18, 25)
-    leg_length = 14
-    hip_y = rect.bottom - 5
+    # Эффект желе (Squash & Stretch)
+    stretch = 0.0
+    if not on_ground:
+        stretch = 0.15 if vy < -50 else 0.08
+    landing = max(0.0, 1.0 - (now - landed_at) / 0.15) if landed_at else 0.0
+    
+    body_w = int(PLAYER_W * (1.0 - stretch * 0.4 + landing * 0.2))
+    body_h = int(PLAYER_H * (1.0 + stretch - landing * 0.3))
+    
+    # Легкое покачивание при ходьбе
+    bob = abs(math.sin(gait_phase)) * 2.0 if moving and on_ground else 0.0
+    cx, cy = int(x), int(y - bob)
+
+    # --- 2. Конечности (Рисуются ПОД телом) ---
+    limb_color = (8, 13, 25)
+    limb_thickness = 3
+
+    # Keep grounded feet inside the collision box so they meet, not cross, platforms.
+    hip_y = cy + round(body_h * 0.22)
+    foot_y = (
+        round(y + PLAYER_H / 2 - 2)
+        if on_ground else cy + body_h // 2 + 8
+    )
     for side in (-1, 1):
-        leg_angle = gait * 32 * side if moving else 0.0
-        leg_vector = pygame.math.Vector2(0, leg_length).rotate(leg_angle)
-        leg_start = (cx + side * 6, hip_y)
-        leg_end = (round(leg_start[0] + leg_vector.x), round(leg_start[1] + leg_vector.y))
-        pygame.draw.line(screen, limb_color, leg_start, leg_end, 3)
+        stride = gait * 4 * side if moving else 0.0
+        hip = (cx + side * 6, hip_y)
+        knee = (round(cx + side * 8 + stride * 0.5), round(hip_y + 6))
+        foot = (round(cx + side * 8 + stride), foot_y)
+        pygame.draw.line(screen, limb_color, hip, knee, limb_thickness)
+        pygame.draw.line(screen, limb_color, knee, foot, limb_thickness)
 
+    # --- 3. Тело ---
+    # Рисуем эллипс напрямую, чтобы squash & stretch работал идеально
+    body_rect = pygame.Rect(0, 0, body_w, body_h)
+    body_rect.center = (cx, cy)
+    
+    body_surface = _make_player_body(tuple(color), body_w, body_h)
+    screen.blit(body_surface, body_surface.get_rect(center=(cx, cy)))
+
+    # --- 4. Руки и Оружие (Рисуются ПОВЕРХ тела) ---
+    # Задняя рука (просто висит)
+    back_shoulder = (cx - facing * 8, cy - 2)
+    back_hand = (back_shoulder[0] - facing * 6, back_shoulder[1] + 10)
+    pygame.draw.line(screen, limb_color, back_shoulder, back_hand, limb_thickness)
+
+    # Передняя рука (с пушкой) — всегда смотрит на прицел
     if aim_target is None:
         aim_target = (cx + facing * 100, cy)
+    
     aim_angle = math.atan2(aim_target[1] - cy, aim_target[0] - cx)
-    aim_direction = pygame.math.Vector2(math.cos(aim_angle), math.sin(aim_angle))
-    perpendicular = pygame.math.Vector2(-aim_direction.y, aim_direction.x)
-    if perpendicular.y < 0:
-        perpendicular = -perpendicular
-    arm_side = 1 if aim_direction.x >= 0 else -1
-    shoulder = pygame.math.Vector2(cx + arm_side * body_w * 0.40, cy - 3)
-    hand = shoulder + aim_direction * (16 - max(0.0, min(1.0, recoil)) * 6)
-    other_shoulder = pygame.math.Vector2(cx - arm_side * body_w * 0.36, cy - 2)
-    other_elbow = other_shoulder + pygame.math.Vector2(-arm_side * 5, 7)
-    other_hand = other_elbow + pygame.math.Vector2(-arm_side * 12, 3)
+    aim_dir = pygame.math.Vector2(math.cos(aim_angle), math.sin(aim_angle))
+    grip_side = pygame.math.Vector2(-aim_dir.y, aim_dir.x)
+    if grip_side.y < 0:
+        grip_side = -grip_side
+    
+    # Отдача (recoil) откидывает руку назад
+    arm_length = 16 - (recoil * 6)
+    shoulder = pygame.math.Vector2(cx + aim_dir.x * 6, cy + aim_dir.y * 6)
+    hand = shoulder + aim_dir * arm_length
+    
+    # Локоть (изгиб руки)
+    elbow = shoulder + aim_dir * (arm_length * 0.5) + grip_side * 4
+    pygame.draw.line(screen, limb_color, shoulder, elbow, limb_thickness)
+    pygame.draw.line(screen, limb_color, elbow, hand, limb_thickness)
 
-    body = _make_player_body(tuple(color), body_w, body_h)
-    screen.blit(body, body.get_rect(center=(cx, cy)))
-    pygame.draw.line(screen, limb_color, other_shoulder, other_elbow, 3)
-    pygame.draw.line(screen, limb_color, other_elbow, other_hand, 3)
-    pygame.draw.line(screen, limb_color, shoulder, hand, 3)
+    # --- 5. Оружие (Пистолет) ---
+    # Ствол
+    muzzle = hand + aim_dir * (19 if weapon_style == 1 else 14)
+    # Рукоятка
+    grip_start = hand + aim_dir * 4
+    grip_end = grip_start + grip_side * 8
+    
+    weapon_width = 9 if weapon_style == 1 else 6
+    pygame.draw.line(screen, (7, 12, 23), hand, muzzle, weapon_width)
+    if weapon_style == 1:
+        pygame.draw.line(
+            screen, (32, 95, 116), hand + aim_dir * 4,
+            muzzle - aim_dir * 2, 4,
+        )
+        pygame.draw.circle(
+            screen, (115, 232, 235),
+            (round(muzzle.x), round(muzzle.y)), 4,
+        )
+    pygame.draw.line(screen, (8, 15, 28), grip_start, grip_end, 5)
+    
+    # Блик на стволе
+    pygame.draw.line(screen, (190, 242, 240), hand + aim_dir * 6, muzzle - aim_dir * 2, 1)
 
-    muzzle = hand + aim_direction * 14
-    grip_start = hand + aim_direction * 5
-    grip_end = grip_start + perpendicular * 8
-    pygame.draw.line(screen, (17, 17, 23), hand, muzzle, 4)
-    pygame.draw.line(screen, (17, 17, 23), grip_start, grip_end, 4)
-    pygame.draw.line(screen, (92, 92, 105), hand + aim_direction * 7,
-                     muzzle - aim_direction * 2, 1)
-    pygame.draw.circle(screen, (24, 24, 31), (round(other_hand.x), round(other_hand.y)), 2)
-    pygame.draw.circle(screen, (24, 24, 31), (round(hand.x), round(hand.y)), 2)
+    # Keep the face unobstructed; eyes and mouth are drawn below.
+    pygame.draw.line(
+        screen, tuple(color),
+        (cx - 9, cy + 8), (cx - 5, cy + 12), 2,
+    )
 
-    eye_y = cy - 4
-    eye_offset = 5
+    # --- 6. Глаза ---
+    eye_y = cy - 7
+    eye_offset = 7
+    # Глаза смотрят в сторону прицела
+    eye_shift_x = int(aim_dir.x * 2)
+    eye_shift_y = int(aim_dir.y * 2)
+    
     for offset in (-eye_offset, eye_offset):
-        eye_x = cx + facing * 2 + offset
-        pygame.gfxdraw.filled_circle(screen, eye_x, eye_y, 2, (14, 14, 19))
-    name_surface = _cached_text(font, name, (231, 236, 249))
-    screen.blit(name_surface, name_surface.get_rect(midbottom=(cx, rect.top - 8)))
-    bar_width, bar_height = 40, 3
-    bar_x, bar_y = cx - bar_width // 2, rect.top - 5
-    pygame.draw.rect(screen, (26, 29, 43), (bar_x, bar_y, bar_width, bar_height))
-    hp_ratio = max(0.0, min(1.0, hp / PLAYER_MAX_HP))
+        eye_x = cx + eye_shift_x + offset
+        eye_position = (eye_x, eye_y + eye_shift_y)
+        if eyes_style == 0:
+            pygame.draw.circle(screen, (169, 255, 246), eye_position, 3)
+        else:
+            eye_rect = pygame.Rect(eye_x - 3, eye_position[1] - 2, 7, 3)
+            pygame.draw.rect(screen, (169, 255, 246), eye_rect, border_radius=1)
+
+    mouth_color = (11, 30, 41)
+    if mouth_style == 0:
+        pygame.draw.arc(
+            screen, mouth_color, pygame.Rect(cx - 6, cy + 1, 12, 9),
+            math.pi, math.tau, 2,
+        )
+    else:
+        pygame.draw.line(screen, mouth_color, (cx - 5, cy + 6), (cx + 5, cy + 6), 2)
+
+    # --- 7. UI Игрока (Имя и HP) ---
+    # В ROUNDS UI минималистичен, рисуем просто текст над головой
+    name_surface = _cached_text(font, name, (220, 220, 230))
+    screen.blit(name_surface, name_surface.get_rect(midbottom=(cx, body_rect.top - 10)))
+    
+    # Тонкая полоска HP
+    bar_width, bar_height = 30, 3
+    bar_x, bar_y = cx - bar_width // 2, body_rect.top - 5
+    reload_progress = (
+        1 - reload_time / reload_duration
+        if reloading and reload_duration > 0 else 0.0
+    )
+    segment_width, segment_height, segment_gap = 8, 3, 2
+    segments_width = MAGAZINE_SIZE * segment_width + (MAGAZINE_SIZE - 1) * segment_gap
+    segments_x = cx - segments_width // 2
+    for index in range(MAGAZINE_SIZE):
+        segment = pygame.Rect(
+            segments_x + index * (segment_width + segment_gap),
+            bar_y - segment_height - 2,
+            segment_width,
+            segment_height,
+        )
+        pygame.draw.rect(screen, (19, 30, 43), segment)
+        fill = (
+            reload_progress * MAGAZINE_SIZE - index
+            if reloading else ammo - index
+        )
+        fill_width = round(segment_width * max(0.0, min(1.0, fill)))
+        if fill_width:
+            pygame.draw.rect(
+                screen, (231, 255, 249),
+                (segment.x, segment.y, fill_width, segment.height),
+            )
+    pygame.draw.rect(screen, (15, 21, 34), (bar_x, bar_y, bar_width, bar_height))
+    hp_ratio = max(0.0, min(1.0, hp / max_hp))
     if hp_ratio:
-        hp_color = (255, 199, 94) if hp_ratio > 0.3 else (255, 104, 112)
-        pygame.draw.rect(screen, hp_color,
-                         (bar_x, bar_y, round(bar_width * hp_ratio), bar_height))
+        hp_color = color # Полоска HP того же цвета, что и игрок
+        pygame.draw.rect(screen, hp_color, (bar_x, bar_y, round(bar_width * hp_ratio), bar_height))
 
 
 def draw_projectile(screen, x, y, color):
+    """Снаряд в стиле ROUNDS: яркая точка со свечением."""
     ix, iy = int(x), int(y)
-    glow = _make_glow(tuple(color), PROJECTILE_RADIUS, 210)
+    glow = _make_glow(tuple(color), PROJECTILE_RADIUS, 255)
     screen.blit(glow, glow.get_rect(center=(ix, iy)))
-    pygame.gfxdraw.filled_circle(screen, ix, iy, PROJECTILE_RADIUS, color)
-    pygame.gfxdraw.aacircle(screen, ix, iy, PROJECTILE_RADIUS, (255, 255, 255))
-    pygame.gfxdraw.filled_circle(
-        screen, ix - 1, iy - 1, max(1, PROJECTILE_RADIUS // 3), (255, 255, 255),
-    )
+    
+    # Ядро снаряда
+    pygame.draw.circle(screen, (255, 255, 255), (ix, iy), PROJECTILE_RADIUS - 2)
+    pygame.draw.circle(screen, color, (ix, iy), PROJECTILE_RADIUS - 1, 2)
 
 
 # --- ОСНОВНОЙ ЦИКЛ ---
 
-def run_client(host="127.0.0.1", port=9999, name="player", color=None):
+def run_client(host="127.0.0.1", port=9999, name="player", color=None,
+               eyes_style=0, mouth_style=0, weapon_style=0):
     server_addr = (host, port)
     pygame.init()
     screen = pygame.display.set_mode((WIDTH, HEIGHT))
     pygame.display.set_caption(f"Shuffling — {name}")
     pygame.mouse.set_visible(False)
     clock = pygame.time.Clock()
-    font = pygame.font.SysFont("arial", 20)
+    font = pygame.font.SysFont("arial", 18)
     card_font = pygame.font.SysFont("arial", 16)
     title_font = pygame.font.SysFont("arial", 30, bold=True)
     current_map = get_map("classic")
@@ -344,6 +495,8 @@ def run_client(host="127.0.0.1", port=9999, name="player", color=None):
     sock.setblocking(False)
     join_payload = json.dumps({
         "type": MSG_JOIN, "name": name, "color": list(selected_color),
+        "eyes_style": eyes_style, "mouth_style": mouth_style,
+        "weapon_style": weapon_style,
     }).encode("utf-8")
     my_id = None
     players = {}
@@ -354,7 +507,6 @@ def run_client(host="127.0.0.1", port=9999, name="player", color=None):
     phase = "connecting"
     particles = ParticleSystem()
     frame_dt = 1.0 / FPS
-    round_number = 0
     winner_id = None
     match_winner_id = None
     host_id = None
@@ -418,6 +570,9 @@ def run_client(host="127.0.0.1", port=9999, name="player", color=None):
                                             "type": MSG_PROFILE,
                                             "name": name,
                                             "color": list(selected_color),
+                                            "eyes_style": eyes_style,
+                                            "mouth_style": mouth_style,
+                                            "weapon_style": weapon_style,
                                         }).encode("utf-8"), server_addr)
                                     except OSError as error:
                                         profile_notice = f"Не удалось изменить цвет: {error}"
@@ -429,8 +584,12 @@ def run_client(host="127.0.0.1", port=9999, name="player", color=None):
                             if rect.collidepoint(event.pos):
                                 pending_upgrade = upgrade_choices[index]["id"]
                                 break
-                    elif (phase == "playing" and my_id is not None
-                          and now - last_shot_time >= SHOOT_COOLDOWN):
+                    elif (phase == "playing" and my_id in players
+                          and now - last_shot_time >= get_shoot_cooldown(
+                              players[my_id].upgrades,
+                          )
+                          and not players[my_id].reloading
+                          and players[my_id].ammo > 0):
                         me = players.get(my_id)
                         if me is not None and me.alive:
                             px, py = me.render_pos(now)
@@ -513,6 +672,9 @@ def run_client(host="127.0.0.1", port=9999, name="player", color=None):
                             join_payload = json.dumps({
                                 "type": MSG_JOIN, "name": name,
                                 "color": list(selected_color),
+                                "eyes_style": eyes_style,
+                                "mouth_style": mouth_style,
+                                "weapon_style": weapon_style,
                             }).encode("utf-8")
                             profile_notice = "Этот цвет уже выбран — назначен свободный цвет."
                             profile_notice_until = now + 4.0
@@ -525,6 +687,9 @@ def run_client(host="127.0.0.1", port=9999, name="player", color=None):
                         profile_notice_until = now + 3.0
                     elif reason == "game_started":
                         error_message = "Матч уже начался. Подключиться можно в следующем лобби."
+                        running = False
+                    elif reason == "invalid_appearance":
+                        error_message = "Сервер отклонил параметры внешнего вида игрока."
                         running = False
                     else:
                         error_message = "На сервере нет свободных мест (максимум 4)."
@@ -542,7 +707,6 @@ def run_client(host="127.0.0.1", port=9999, name="player", color=None):
                     try:
                         previous_phase = phase
                         phase = message["phase"]
-                        round_number = int(message["round"])
                         winner_id = message.get("winner_id")
                         match_winner_id = message.get("match_winner_id")
                         host_id = message.get("host_id")
@@ -560,6 +724,15 @@ def run_client(host="127.0.0.1", port=9999, name="player", color=None):
                             alive = bool(entry["alive"])
                             score = int(entry["score"])
                             upgrades = dict(entry["upgrades"])
+                            ammo = int(entry["ammo"])
+                            reloading = bool(entry["reloading"])
+                            reload_time = float(entry["reload_time"])
+                            reload_duration = float(entry["reload_duration"])
+                            eyes_style = int(entry["eyes_style"])
+                            mouth_style = int(entry["mouth_style"])
+                            weapon_style = int(entry["weapon_style"])
+                            round_streak = int(entry["round_streak"])
+                            score_squares = int(entry["score_squares"])
                             vx, vy = float(entry["vx"]), float(entry["vy"])
                             if not math.isfinite(x) or not math.isfinite(y):
                                 continue
@@ -569,6 +742,10 @@ def run_client(host="127.0.0.1", port=9999, name="player", color=None):
                                 players[player_id] = RemotePlayer(
                                     player_id, x, y, color, facing, on_ground, now,
                                     player_name, hp, alive, score, upgrades,
+                                    ammo, reloading, reload_time, reload_duration,
+                                    eyes_style, mouth_style, weapon_style,
+                                    round_streak,
+                                    score_squares,
                                 )
                             else:
                                 if (phase == previous_phase == "playing"
@@ -577,7 +754,11 @@ def run_client(host="127.0.0.1", port=9999, name="player", color=None):
                                 remote.push_snapshot(
                                     x, y, color, facing, on_ground, now,
                                     player_name, hp, alive, score, upgrades,
-                                    vx, vy,
+                                    vx, vy, ammo, reloading, reload_time,
+                                    reload_duration,
+                                    eyes_style, mouth_style, weapon_style,
+                                    round_streak,
+                                    score_squares,
                                 )
                             if player_id == my_id:
                                 selected_color = color
@@ -600,22 +781,33 @@ def run_client(host="127.0.0.1", port=9999, name="player", color=None):
                             )
                             if not all(math.isfinite(value) for value in values):
                                 continue
+                            gravity = float(entry["gravity"])
+                            if not math.isfinite(gravity):
+                                continue
                             if projectile is None:
                                 projectiles[projectile_id] = RemoteProjectile(
-                                    projectile_id, *values, tuple(entry["color"]), now,
+                                    projectile_id, *values, tuple(entry["color"]),
+                                    entry["effect"], gravity, now,
                                 )
                             else:
                                 projectile.push_snapshot(
-                                    *values, tuple(entry["color"]), now,
+                                    *values, tuple(entry["color"]),
+                                    entry["effect"], gravity, now,
                                 )
                         for projectile_id in list(projectiles):
                             if projectile_id not in incoming_projectiles:
                                 if phase == previous_phase == "playing":
                                     projectile = projectiles[projectile_id]
                                     x, y = projectile.render_pos(now)
+                                    if projectile.effect == "explosion":
+                                        count, speed, size = 26, 250, 11
+                                    elif projectile.effect == "poison":
+                                        count, speed, size = 14, 170, 6
+                                    else:
+                                        count, speed, size = 7, 130, 4
                                     particles.burst(
                                         x, y, projectile.color,
-                                        count=7, speed=130, size=4,
+                                        count=count, speed=speed, size=size,
                                     )
                                 del projectiles[projectile_id]
                         last_state_time = now
@@ -641,17 +833,23 @@ def run_client(host="127.0.0.1", port=9999, name="player", color=None):
                     recoil=max(0.0, 1.0 - (now - last_shot_time) / 0.12)
                     if player_id == my_id else 0.0,
                     landed_at=remote.landed_at,
+                    max_hp=get_max_health(remote.upgrades),
+                    ammo=remote.ammo,
+                    reloading=remote.reloading,
+                    reload_time=remote.reload_time,
+                    reload_duration=remote.reload_duration,
+                    eyes_style=remote.eyes_style,
+                    mouth_style=remote.mouth_style,
+                    weapon_style=remote.weapon_style,
                 )
             for projectile in projectiles.values():
                 x, y = projectile.render_pos(now)
                 draw_projectile(screen, x, y, projectile.color)
             particles.update_and_draw(screen, frame_dt)
 
-            scoreboard = "   ".join(
-                f"{remote.name}: {remote.score}" for remote in players.values()
-            )
-            screen.blit(font.render(f"Раунд {round_number}   {scoreboard}", True,
-                                    (255, 255, 255)), (20, 20))
+            # Отрисовка UI (упрощенная)
+            if players and phase != "waiting":
+                draw_round_scoreboard(screen, players)
             status_text = {
                 "connecting": "Подключение...",
                 "waiting": "Ожидание второго игрока...",
@@ -659,6 +857,7 @@ def run_client(host="127.0.0.1", port=9999, name="player", color=None):
                 "draft": "Выбор улучшения",
                 "match_over": "Матч окончен",
             }.get(phase)
+            
             if phase == "draft":
                 local_player = players.get(my_id)
                 if local_player is not None and winner_id == my_id:
@@ -669,12 +868,17 @@ def run_client(host="127.0.0.1", port=9999, name="player", color=None):
                     status_text = "Соперники выбирают улучшения"
                 else:
                     status_text = "Проигрыш раунда: выберите улучшение"
+                    
             if status_text and phase != "draft":
                 if winner_id in players:
                     status_text += f": победил {players[winner_id].name}"
                 if phase != "match_over":
-                    banner = font.render(status_text, True, (255, 230, 120))
-                    screen.blit(banner, banner.get_rect(center=(WIDTH // 2, HEIGHT // 2)))
+                    banner = font.render(status_text, True, (235, 250, 255))
+                    banner_rect = banner.get_rect(center=(WIDTH // 2, HEIGHT // 2))
+                    panel_rect = banner_rect.inflate(44, 28)
+                    draw_panel(screen, panel_rect, fill=(10, 18, 32), border=(255, 111, 105))
+                    screen.blit(banner, banner_rect)
+                    
             if phase == "draft":
                 local_player = players.get(my_id)
                 if local_player is not None and winner_id == my_id:
@@ -686,22 +890,51 @@ def run_client(host="127.0.0.1", port=9999, name="player", color=None):
                 else:
                     for index, card in enumerate(upgrade_choices[:3]):
                         rect = card_rects[index]
-                        pygame.draw.rect(screen, (40, 43, 65), rect, border_radius=12)
-                        pygame.draw.rect(screen, (220, 200, 110), rect, 2, border_radius=12)
-                        title = font.render(f"{index + 1}. {card['name']}", True, (255, 240, 180))
-                        description = card_font.render(
-                            card["description"], True, (235, 235, 245),
+                        rarity_colors = {
+                            "Обычная": (85, 210, 218),
+                            "Необычная": (132, 238, 157),
+                            "Редкая": (205, 139, 255),
+                        }
+                        rarity = card["rarity"]
+                        border_color = rarity_colors[rarity]
+                        draw_panel(screen, rect, fill=(11, 20, 35), border=border_color, radius=14)
+                        pygame.draw.line(
+                            screen, border_color, (rect.x + 15, rect.bottom - 8),
+                            (rect.right - 15, rect.bottom - 8), 2,
+                        )
+                        title = font.render(
+                            f"{index + 1:02d}  {card['name']}", True, (242, 247, 255),
+                        )
+                        rarity_label = card_font.render(
+                            f"◆ {rarity.upper()}", True, rarity_colors[rarity],
+                        )
+                        description_lines = _wrap_text(
+                            card_font, card["description"], rect.width - 28,
+                        )
+                        stats_lines = _wrap_text(
+                            card_font, card.get("stats", ""), rect.width - 28,
                         )
                         level_text = font.render(
                             f"Уровень {card['level']} → {card['level'] + 1}",
-                            True, (180, 215, 255),
+                            True, (104, 224, 226),
                         )
-                        screen.blit(title, (rect.x + 14, rect.y + 24))
-                        screen.blit(description, (rect.x + 14, rect.y + 78))
-                        screen.blit(level_text, (rect.x + 14, rect.y + 132))
-                    prompt = font.render(status_text + " (клик или клавиши 1–3)",
-                                         True, (255, 230, 120))
+                        screen.blit(title, (rect.x + 14, rect.y + 16))
+                        screen.blit(rarity_label, (rect.x + 14, rect.y + 48))
+                        for line_index, line in enumerate(description_lines[:2]):
+                            screen.blit(
+                                card_font.render(line, True, (194, 207, 225)),
+                                (rect.x + 14, rect.y + 74 + line_index * 20),
+                            )
+                        for line_index, line in enumerate(stats_lines[:2]):
+                            screen.blit(
+                                card_font.render(line, True, (143, 166, 194)),
+                                (rect.x + 14, rect.y + 120 + line_index * 20),
+                            )
+                        screen.blit(level_text, (rect.x + 14, rect.y + 162))
+                    prompt = font.render(status_text + " · клик или клавиши 1–3",
+                                         True, (143, 245, 235))
                     screen.blit(prompt, prompt.get_rect(center=(WIDTH // 2, HEIGHT // 2 - 125)))
+                    
             if phase == "match_over":
                 champ = players.get(match_winner_id)
                 if champ is not None:
@@ -709,18 +942,16 @@ def run_client(host="127.0.0.1", port=9999, name="player", color=None):
                         f"Матч выиграл {champ.name}!", True, (255, 230, 120),
                     )
                     screen.blit(banner, banner.get_rect(center=(WIDTH // 2, HEIGHT // 2)))
+                    
             if phase == "waiting":
-                panel_surface = pygame.Surface(lobby_panel.size, pygame.SRCALPHA)
-                panel_surface.fill((19, 23, 40, 232))
-                screen.blit(panel_surface, lobby_panel.topleft)
-                pygame.draw.rect(screen, (116, 131, 177), lobby_panel, 2, border_radius=20)
-                lobby_title = title_font.render("ПРЕДСТАРТОВОЕ ЛОББИ", True, (247, 225, 164))
+                draw_panel(screen, lobby_panel, fill=(10, 17, 31), border=(68, 232, 231), radius=20)
+                lobby_title = title_font.render("АРЕНА · ЛОББИ", True, (235, 250, 255))
                 screen.blit(lobby_title, lobby_title.get_rect(
                     center=(WIDTH // 2, lobby_panel.y + 48),
                 ))
                 lobby_subtitle = card_font.render(
                     "Соберите друзей · выберите цвета · дождитесь старта хоста",
-                    True, (184, 195, 220),
+                    True, (133, 179, 204),
                 )
                 screen.blit(lobby_subtitle, lobby_subtitle.get_rect(
                     center=(WIDTH // 2, lobby_panel.y + 82),
@@ -728,21 +959,22 @@ def run_client(host="127.0.0.1", port=9999, name="player", color=None):
                 for index, remote in enumerate(players.values()):
                     row_y = lobby_panel.y + 115 + index * 48
                     row_rect = pygame.Rect(lobby_panel.x + 42, row_y, 576, 44)
-                    pygame.draw.rect(screen, (34, 39, 60), row_rect, border_radius=12)
-                    pygame.draw.circle(screen, remote.color, (row_rect.x + 31, row_rect.centery), 16)
+                    pygame.draw.rect(screen, (14, 26, 43), row_rect, border_radius=10)
+                    pygame.draw.rect(screen, (39, 76, 98), row_rect, 1, border_radius=10)
+                    pygame.draw.circle(screen, remote.color, (row_rect.x + 31, row_rect.centery), 13)
                     pygame.draw.circle(screen, (255, 255, 255),
                                        (row_rect.x + 31, row_rect.centery), 16, 2)
-                    player_label = font.render(remote.name, True, (245, 245, 250))
+                    player_label = font.render(remote.name, True, (235, 244, 252))
                     screen.blit(player_label, (row_rect.x + 62, row_rect.y + 15))
                     role = "ХОСТ" if remote.pid == host_id else "ИГРОК"
-                    role_color = (246, 210, 120) if remote.pid == host_id else (160, 174, 207)
+                    role_color = (255, 132, 112) if remote.pid == host_id else (104, 201, 211)
                     role_label = card_font.render(role, True, role_color)
                     screen.blit(role_label, role_label.get_rect(
                         midright=(row_rect.right - 18, row_rect.centery),
                     ))
                 palette_label = card_font.render(
                     "ВАШ ЦВЕТ — кликните, чтобы выбрать другой",
-                    True, (185, 197, 224),
+                    True, (133, 179, 204),
                 )
                 screen.blit(palette_label, palette_label.get_rect(
                     center=(WIDTH // 2, lobby_panel.y + 322),
@@ -766,9 +998,9 @@ def run_client(host="127.0.0.1", port=9999, name="player", color=None):
                                          (rect.left + 8, rect.bottom - 8),
                                          (rect.right - 8, rect.top + 8), 4)
                 if my_id == host_id:
-                    button_color = (83, 174, 119) if len(players) >= 2 else (74, 80, 100)
-                    pygame.draw.rect(screen, button_color, lobby_start_rect, border_radius=13)
-                    pygame.draw.rect(screen, (208, 231, 198), lobby_start_rect, 2, border_radius=13)
+                    button_color = (28, 135, 132) if len(players) >= 2 else (43, 55, 72)
+                    pygame.draw.rect(screen, button_color, lobby_start_rect, border_radius=10)
+                    pygame.draw.rect(screen, (68, 232, 231), lobby_start_rect, 2, border_radius=10)
                     button_text = "ЗАПУСТИТЬ МАТЧ" if len(players) >= 2 else "ЖДЁМ ИГРОКОВ..."
                     button_label = font.render(button_text, True, (255, 255, 245))
                     screen.blit(button_label, button_label.get_rect(center=lobby_start_rect.center))
@@ -785,16 +1017,20 @@ def run_client(host="127.0.0.1", port=9999, name="player", color=None):
                     screen.blit(toast, toast.get_rect(
                         center=(WIDTH // 2, lobby_panel.bottom - 94),
                     ))
+                    
             hint = font.render(
                 "A/D — движение, Space — прыжок, ЛКМ — выстрел, Esc — выход",
-                True, (255, 255, 255),
+                True, (119, 154, 177),
             )
             screen.blit(hint, (20, HEIGHT - 34))
+            
             if error_message:
                 error = font.render(error_message, True, (255, 100, 100))
                 screen.blit(error, error.get_rect(center=(WIDTH // 2, HEIGHT // 2 + 40)))
+                
             if my_id is not None:
                 draw_crosshair(screen, pygame.mouse.get_pos())
+                
             pygame.display.flip()
     finally:
         if my_id is not None:
@@ -804,6 +1040,7 @@ def run_client(host="127.0.0.1", port=9999, name="player", color=None):
                 pass
         sock.close()
         pygame.mouse.set_visible(True)
+        
     if error_message and not quit_requested:
         while True:
             dismissed = False
