@@ -59,7 +59,7 @@ python -m pip install pygame
 python -m client.client --host 127.0.0.1 --port 9999 --name Player
 ```
 
-## Структура     
+## Структура      
 
 - `client/` — меню и сетевой клиент.
 - `server/` — серверная физика и игровая логика сетевого режима.
